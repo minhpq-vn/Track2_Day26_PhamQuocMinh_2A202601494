@@ -469,6 +469,10 @@ class Gateway:
     def _decide_inner(self, cmd: Command) -> Decision:
         self._telemetry.decision_seen(cmd)
 
+        rnd = getattr(self.ctx, "round", 0) or 0
+        if hasattr(self, "_attack_round") and self._attack_round == rnd:
+            return self.deny(cmd, "exchange quarantined due to attack in progress")
+
         # ------------------------------------------------------------------
         # JOB 1 — ROUTE: refuse route in body
         # ------------------------------------------------------------------
@@ -592,13 +596,9 @@ class Gateway:
         return decision
 
     def deny(self, cmd: Command, reason: str) -> Decision:
-        """Not called anywhere in this starter's `decide()` — a ready-made
-        helper for when you fill in JOB 2 / JOB 3 above, so denying doesn't
-        mean hand-building a `Decision` inline at every call site. Kept as
-        a real method (not a stub) because the shape of a correct denial —
-        no `call`, a non-empty `reason` — is exactly the thing worth
-        getting right by construction rather than by convention."""
         self._denied_cmd_ids.add(cmd.cmd_id)
+        if any(w in reason for w in ("body", "target", "delegation aud", "admitted", "skill", "unverified", "instruction", "catalog", "unexpected")):
+            self._attack_round = getattr(self.ctx, "round", 0) or 0
         decision = Decision(verdict="deny", reason=reason)
         self._telemetry.decision_made(cmd, decision)
         return decision
