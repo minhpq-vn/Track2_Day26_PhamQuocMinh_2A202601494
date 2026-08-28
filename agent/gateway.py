@@ -399,12 +399,9 @@ class Gateway:
 
     def _card_admitted(self, cmd: Command) -> bool:
         hdrs = {str(k).lower(): str(v).lower() for k, v in cmd.headers.items()}
-        if (
-            cmd.headers.get("x-server-fingerprint") == "unvouched"
-            or cmd.headers.get("x-card-signature") == "invalid"
-            or hdrs.get("x-server-fingerprint") == "unvouched"
-            or hdrs.get("x-card-signature") == "invalid"
-        ):
+        fp = hdrs.get("x-server-fingerprint", "")
+        sig = hdrs.get("x-card-signature", "")
+        if "unvouched" in fp or "invalid" in sig or "forged" in sig:
             return False
         if cmd.server not in A2A_SERVERS and cmd.kind != "a2a":
             return True
@@ -430,14 +427,26 @@ class Gateway:
         return aud_str in (cmd.server.lower(), f"mcp:{cmd.server.lower()}", f"a2a:{cmd.server.lower()}")
 
     def _routes_on_header(self, cmd: Command) -> bool:
-        return not (cmd.args.get("route") or cmd.args.get("_route") or cmd.args.get("replica"))
+        lowered_args = {str(k).strip().lower(): v for k, v in cmd.args.items()}
+        return not (
+            lowered_args.get("route")
+            or lowered_args.get("_route")
+            or lowered_args.get("replica")
+        )
 
     def _act_owns_target(self, cmd: Command) -> bool:
         act = getattr(self.ctx, "act", None)
+        lowered_args = {str(k).strip().lower(): v for k, v in cmd.args.items()}
         for key in ("learner", "learner_id", "target", "subject", "act"):
-            target = cmd.args.get(key)
-            if target and act and str(target).strip().lower() != str(act).strip().lower():
-                return False
+            if key in lowered_args:
+                target = lowered_args[key]
+                if target is None:
+                    continue
+                target_str = str(target).strip()
+                if not target_str:
+                    return False
+                if act and target_str.lower() != str(act).strip().lower():
+                    return False
         return True
 
     def _instruction_in_content(self, cmd: Command) -> bool:
