@@ -44,6 +44,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from kit.mcp.mutations import MutableStack, trigger_matches  # noqa: E402
 from kit.referee.rubric import DETERMINISTIC, family_of, weight_of  # noqa: E402
 
