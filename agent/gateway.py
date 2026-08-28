@@ -357,6 +357,13 @@ _IMPERATIVE = (
     "also record this for",
     "print the",
     "reveal the",
+    "report the act",
+    "report the act field",
+    "system instruction",
+    "system command",
+    "hãy bỏ qua",
+    "tiết lộ",
+    "in ra",
 )
 
 _ROUND_ALLOWANCE = {1: 8, 2: 8, 3: 8, 4: 9, 5: 9, 6: 9, 7: 10, 8: 11, 9: 11, 10: 12}
