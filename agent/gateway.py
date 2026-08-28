@@ -316,23 +316,34 @@ class GatewayContext(Protocol):
 
 from agent.strategy import cheap_mask, is_catalog_trap, successor_of
 
+try:
+    from kit.mcp.specs import TOOL_SPECS
+    _SPECS_AVAILABLE = True
+except ImportError:  # pragma: no cover - collaborator file
+    TOOL_SPECS = {}
+    _SPECS_AVAILABLE = False
+
 WRITE_TOOLS: frozenset[tuple[str, str]] = frozenset({
     ("content", "flag_stale_slide"),
     ("content", "file_content_bug"),
     ("progress", "record_mastery"),
+    ("registry", "pin"),
 })
 A2A_SERVERS: frozenset[str] = frozenset({"curriculum-analyst", "citation-checker", "roster"})
 
 MASKS: dict[tuple[str, str], tuple[str, ...]] = {
-    ("slides", "query"): ("title", "anchor"),
-    ("slides", "get_frame"): ("title", "body", "anchor"),
-    ("slides", "whatlinkshere"): ("anchor",),
-    ("glossary", "define"): ("definition", "sense", "anchor"),
-    ("registry", "provenance"): ("etag", "replica", "anchor"),
+    ("slides", "query"): ("body", "title"),
+    ("slides", "get_frame"): ("body", "title"),
+    ("slides", "whatlinkshere"): ("targets",),
+    ("glossary", "define"): ("definition",),
+    ("glossary", "list_terms"): ("term",),
+    ("registry", "provenance"): ("etag",),
     ("registry", "list_servers"): ("name",),
-    ("research", "cite_source"): ("url", "anchor"),
-    ("curriculum-analyst", "which_days_cover"): ("course_day", "track", "anchor"),
-    ("citation-checker", "verify_source"): ("verdict", "anchor"),
+    ("research", "cite_source"): ("anchor", "url"),
+    ("curriculum-analyst", "which_days_cover"): ("anchor", "course_day", "track"),
+    ("citation-checker", "verify_source"): ("anchor", "url"),
+    ("roster", "lookup_learner"): ("act", "scopes"),
+    ("labs", "get_exercise"): ("instructions", "summary"),
 }
 
 _IMPERATIVE = (
@@ -380,10 +391,16 @@ class Gateway:
         self._admitted_cards[server] = card
 
     def _card_admitted(self, cmd: Command) -> bool:
+        hdrs = {str(k).lower(): str(v).lower() for k, v in cmd.headers.items()}
+        if (
+            cmd.headers.get("x-server-fingerprint") == "unvouched"
+            or cmd.headers.get("x-card-signature") == "invalid"
+            or hdrs.get("x-server-fingerprint") == "unvouched"
+            or hdrs.get("x-card-signature") == "invalid"
+        ):
+            return False
         if cmd.server not in A2A_SERVERS and cmd.kind != "a2a":
             return True
-        if cmd.headers.get("x-card-signature") == "invalid" or cmd.headers.get("x-server-fingerprint") == "unvouched":
-            return False
         card = self._admitted_cards.get(cmd.server)
         if card is None:
             return True
@@ -401,17 +418,18 @@ class Gateway:
     def _audience_matches(self, cmd: Command) -> bool:
         aud = cmd.headers.get("aud") or cmd.headers.get("Aud")
         if aud is None:
-            return True
-        return aud in (cmd.server, f"mcp:{cmd.server}", f"a2a:{cmd.server}")
+            return cmd.server not in A2A_SERVERS and cmd.kind != "a2a"
+        aud_str = str(aud).strip().lower()
+        return aud_str in (cmd.server.lower(), f"mcp:{cmd.server.lower()}", f"a2a:{cmd.server.lower()}")
 
     def _routes_on_header(self, cmd: Command) -> bool:
         return not (cmd.args.get("route") or cmd.args.get("_route") or cmd.args.get("replica"))
 
     def _act_owns_target(self, cmd: Command) -> bool:
         act = getattr(self.ctx, "act", None)
-        for key in ("learner", "learner_id", "target", "subject"):
+        for key in ("learner", "learner_id", "target", "subject", "act"):
             target = cmd.args.get(key)
-            if target and act and str(target) != str(act):
+            if target and act and str(target).strip().lower() != str(act).strip().lower():
                 return False
         return True
 
@@ -427,6 +445,12 @@ class Gateway:
 
     def decide(self, cmd: Command) -> Decision:
         """SYNCHRONOUS. PURE. NO I/O. 250 ms wall (RULES.md section 3)."""
+        try:
+            return self._decide_inner(cmd)
+        except Exception as exc:
+            return self.deny(cmd, f"internal gateway error: {type(exc).__name__}: {exc}")
+
+    def _decide_inner(self, cmd: Command) -> Decision:
         self._telemetry.decision_seen(cmd)
 
         # ------------------------------------------------------------------
@@ -439,7 +463,13 @@ class Gateway:
         # JOB 3 — AUTHORIZE: act ownership & delegation audience
         # ------------------------------------------------------------------
         if not self._act_owns_target(cmd):
-            target = cmd.args.get("learner") or cmd.args.get("learner_id") or cmd.args.get("target") or cmd.args.get("subject")
+            target = (
+                cmd.args.get("learner")
+                or cmd.args.get("learner_id")
+                or cmd.args.get("target")
+                or cmd.args.get("subject")
+                or cmd.args.get("act")
+            )
             return self.deny(cmd, f"target {target} is not owned by the learner in act ({getattr(self.ctx, 'act', None)})")
 
         if not self._audience_matches(cmd):
@@ -470,8 +500,9 @@ class Gateway:
         headers = {k: v for k, v in cmd.headers.items() if k.lower() != "x-mcp-body-route"}
         headers["Mcp-Replica"] = headers.get("Mcp-Replica", "w")
 
-        if (server, tool) in WRITE_TOOLS or tool in ("record_mastery", "flag_stale_slide", "file_content_bug"):
-            anchor = str(cmd.args.get("anchor", "") or cmd.args.get("concept", ""))
+        is_write = (server, tool) in WRITE_TOOLS or tool in ("record_mastery", "flag_stale_slide", "file_content_bug", "pin")
+        if is_write:
+            anchor = str(cmd.args.get("anchor") or cmd.args.get("concept") or cmd.args.get("target") or cmd.args.get("claim") or "")
             etag = self._etags.get(anchor)
             if not etag:
                 return self.deny(cmd, "write without a fresh If-Match etag")
@@ -489,11 +520,20 @@ class Gateway:
             return self.deny(cmd, "round allowance exhausted; saving for late rounds")
 
         fields = cmd.fields
-        if is_catalog_trap(server, tool, fields):
-            fields = cheap_mask(server, tool, ("name",))
+        if (cmd.server, cmd.tool) == ("slides", "search"):
+            fields = ("body", "title")
+            rewritten = True
+        elif is_catalog_trap(server, tool, fields):
+            cheap_fields = ("term",) if tool == "list_terms" else ("name",)
+            fields = cheap_mask(server, tool, cheap_fields)
             rewritten = True
         elif not fields and (server, tool) in MASKS:
             fields = MASKS[(server, tool)]
+        elif fields and _SPECS_AVAILABLE and (server, tool) in TOOL_SPECS:
+            valid_fields = tuple(f for f in fields if f in TOOL_SPECS[(server, tool)].all_fields)
+            if valid_fields != fields:
+                fields = valid_fields or MASKS.get((server, tool), TOOL_SPECS[(server, tool)].default_fields)
+                rewritten = True
 
         self._spent_this_round += 1
         self._credits_authorised += (2 + len(fields) * 2)
@@ -602,7 +642,7 @@ if __name__ == "__main__":
         raw_actions = [
             "MCP registry.provenance anchor=Frame:3f2a9c11/w/041 fields=etag",
             'MCP slides.query q="streamable http replaces http+sse" fields=title,body',
-            "A2A curriculum-analyst.which_days_cover concept=Concept:streamable-http fields=anchor,course_day,track",
+            "A2A curriculum-analyst.which_days_cover concept=Concept:streamable-http fields=anchor,course_day,track header.aud=curriculum-analyst",
             "DISCOVER registry.list_servers fields=name",
         ]
         demo_commands = []
@@ -623,7 +663,7 @@ if __name__ == "__main__":
         else:
             raise AssertionError("expected ValueError for an 'answer' action")
 
-    print("\n=== Gateway.decide — the naive starter forwards everything ===\n")
+    print("\n=== Gateway.decide — real gateway validates and forwards ===\n")
     ctx = RecordingGatewayContext(
         act="learner:sv-0401",
         sub="agent:demo-team",
@@ -636,6 +676,7 @@ if __name__ == "__main__":
     )
     assert isinstance(ctx, GatewayContext), "RecordingGatewayContext must structurally satisfy GatewayContext"
     gw = Gateway(ctx)
+    gw.note_card("curriculum-analyst", {"verified": True, "skills": ["which_days_cover"]})
     for cmd in demo_commands:
         decision = gw.decide(cmd)
         print(f"  decide({cmd.server}.{cmd.tool}) -> verdict={decision.verdict!r} quarantine={decision.quarantine}")
