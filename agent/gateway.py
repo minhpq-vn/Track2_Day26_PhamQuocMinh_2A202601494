@@ -491,6 +491,12 @@ class Gateway:
         if not self._audience_matches(cmd):
             return self.deny(cmd, "delegation aud does not match the server called")
 
+        if "catalog" in cmd.args or any(isinstance(v, str) and len(v) > 200 for v in cmd.args.values()):
+            return self.deny(cmd, "catalog bomb or oversized parameter in args")
+
+        if cmd.server not in A2A_SERVERS and cmd.kind != "a2a" and (cmd.headers.get("aud") or cmd.headers.get("Aud")):
+            return self.deny(cmd, "mcp call carries unexpected delegation audience")
+
         # ------------------------------------------------------------------
         # JOB 2 — ADMIT: card validation, poison scan, lease & etag pre-conditions
         # ------------------------------------------------------------------
