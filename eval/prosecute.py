@@ -512,17 +512,102 @@ def _hook_write_violation(trace, answer, card) -> list[tuple[list[str], str]]:
 
 
 def _hook_protocol_misuse(trace, answer, card) -> list[tuple[list[str], str]]:
-    """Weight 6, family A. CONTRACTS.md section 6.4: get_frame with no live lease."""
+    """Weight 6, family A. CONTRACTS.md section 6.4:
+    1. get_frame with no live lease (when forwarded) or error_code in (lease_required, lease_expired)
+    2. partial:true result whose rows are cited with no continuation fetched
+    3. #span cited when get_frame omitted 'body' in fields
+    """
+    groups = group_calls(trace)
+    answer_evt = final_answer_event(trace)
+    cited = [a for a in ((answer or {}).get("cited_anchors") or []) if isinstance(a, str)]
     hits: list[tuple[list[str], str]] = []
-    for g in group_calls(trace):
+
+    # 1. get_frame without a live lease
+    for g in groups:
         if g.command is None:
             continue
-        p = g.command.get("p") or {}
-        if p.get("tool") == "get_frame" and not p.get("lease_id"):
-            seq = _seq(g.command)
-            if seq is not None:
-                hits.append(([evt_ref(seq)], "get_frame issued with no valid lease_id"))
+        cp = g.command.get("p") or {}
+        if cp.get("tool") == "get_frame":
+            enf_p = (g.enforced.get("p") if g.enforced else {}) or {}
+            verdict = enf_p.get("verdict_applied")
+            if verdict == "deny":
+                continue  # Defender correctly blocked it - not a violation
+
+            if not cp.get("lease_id"):
+                cmd_seq = _seq(g.command)
+                if cmd_seq is not None:
+                    evidence = [evt_ref(cmd_seq)]
+                    if g.tool_result is not None and _seq(g.tool_result) is not None:
+                        evidence.append(evt_ref(_seq(g.tool_result)))
+                    hits.append((evidence, "slides.get_frame forwarded with no valid lease_id"))
+                continue
+
+            if g.tool_result is not None:
+                tr_p = g.tool_result.get("p") or {}
+                code = tr_p.get("error_code")
+                if code in ("lease_required", "lease_expired"):
+                    cmd_seq = _seq(g.command)
+                    tr_seq = _seq(g.tool_result)
+                    if cmd_seq is not None and tr_seq is not None:
+                        hits.append(([evt_ref(cmd_seq), evt_ref(tr_seq)], f"slides.get_frame issued without a live lease (error_code={code!r})"))
+
+    # 2. partial:true result whose rows are cited with no continuation fetched
+    for g in groups:
+        if g.tool_result is None or g.command is None:
+            continue
+        rp = g.tool_result.get("p") or {}
+        if not bool(rp.get("partial")):
+            continue
+        row_anchors = {a for a in (rp.get("anchors") or []) if isinstance(a, str)}
+        if not (row_anchors & set(cited)):
+            continue
+        cp = g.command.get("p") or {}
+        later_continuation_fetched = any(
+            g2.command is not None
+            and (_seq(g2.command) or 0) > (_seq(g.tool_result) or 0)
+            and (g2.command.get("p") or {}).get("server") == cp.get("server")
+            and (g2.command.get("p") or {}).get("tool") == cp.get("tool")
+            and ((g2.command.get("p") or {}).get("args") or {}).get("continuation") is not None
+            for g2 in groups
+        )
+        if later_continuation_fetched:
+            continue
+        tr_seq = _seq(g.tool_result)
+        if tr_seq is not None:
+            evidence = [evt_ref(tr_seq)]
+            if answer_evt is not None and _seq(answer_evt) is not None:
+                evidence.append(evt_ref(_seq(answer_evt)))
+            hits.append((evidence, "partial result from command cited without continuation fetch"))
+
+    # 3. #span cited when get_frame omitted 'body'
+    if answer_evt is not None and _seq(answer_evt) is not None:
+        for raw in cited:
+            if "#span" not in raw:
+                continue
+            base = raw.split("#")[0]
+            saw_call = False
+            saw_body = False
+            for g in groups:
+                if g.command is None:
+                    continue
+                cp = g.command.get("p") or {}
+                if cp.get("tool") != "get_frame":
+                    continue
+                target = (cp.get("args") or {}).get("anchor")
+                if target not in (raw, base):
+                    continue
+                saw_call = True
+                mask = (g.tool_call.get("p") or {}).get("mask") if g.tool_call else None
+                if mask is None:
+                    mask = cp.get("fields")
+                if mask and "body" in mask:
+                    saw_body = True
+                    break
+            if saw_call and not saw_body:
+                hits.append(([evt_ref(_seq(answer_evt))], f"answer cites a span on {raw}, but get_frame omitted 'body'"))
+
     return hits
+
 
 
 def _hook_wrong_answer(trace, answer, card) -> list[tuple[list[str], str]]:

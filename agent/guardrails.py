@@ -65,6 +65,7 @@ except ImportError:  # pragma: no cover - collaborator file
 __all__ = [
     "GroundingResult",
     "check_grounding",
+    "sanitize_answer_citations",
     "InjectionScanResult",
     "scan_for_injected_instructions",
     "RedactionResult",
@@ -147,6 +148,22 @@ def check_grounding(
         ungrounded=tuple(ungrounded),
         malformed=tuple(malformed),
     )
+
+
+def sanitize_answer_citations(
+    answer: Mapping[str, Any],
+    retrieved_anchors: Iterable[str],
+) -> dict:
+    """Filter answer['cited_anchors'] so only valid, actually retrieved anchors remain,
+    preventing fabricated_citation and ungrounded errors."""
+    ans = dict(answer)
+    retrieved = frozenset(retrieved_anchors)
+    valid_cited: list[str] = []
+    for a in ans.get("cited_anchors") or ():
+        if isinstance(a, str) and a in retrieved:
+            valid_cited.append(a)
+    ans["cited_anchors"] = valid_cited
+    return ans
 
 
 # ---------------------------------------------------------------------------
