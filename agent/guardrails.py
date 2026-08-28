@@ -47,8 +47,14 @@ Stdlib only. No network, no randomness, no wall-clock reads.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Mapping
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 # kit.world.anchor is a collaborator's file (workspace hard rule 2). Present
 # and stable as of this writing; degraded gracefully so `check_grounding`
@@ -188,6 +194,10 @@ _INJECTION_PATTERNS = (
     re.compile(r"reveal\s+the", re.IGNORECASE),
     re.compile(r"print\s+the", re.IGNORECASE),
     re.compile(r"report\s+the\s+act\s+field", re.IGNORECASE),
+    re.compile(r"(?:<!--|/\*)\s*system\s+override", re.IGNORECASE),
+    re.compile(r"\[SYSTEM(?:\s+INSTRUCTION|\s+COMMAND)?\]", re.IGNORECASE),
+    re.compile(r"===\s*SYSTEM\s+OVERRIDE\s*===", re.IGNORECASE),
+    re.compile(r"hãy\s+(?:bỏ\s+qua|tiết\s+lộ|in\s+ra)", re.IGNORECASE),
 )
 
 
@@ -245,11 +255,18 @@ class ArithmeticCheckResult:
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
-def verify_arithmetic(text: str) -> ArithmeticCheckResult:
-    """Verify numbers in answer text."""
+def verify_arithmetic(text: str, source_texts: Iterable[str] = ()) -> ArithmeticCheckResult:
+    """Verify numbers in answer text against source observations if provided."""
     numbers = _NUMBER_RE.findall(text)
     if not numbers:
         return ArithmeticCheckResult(checked=True, ok=True, detail="no numbers to verify")
+    sources = list(source_texts)
+    if sources:
+        combined = " ".join(sources)
+        unverified = [n for n in numbers if n not in combined]
+        if unverified:
+            return ArithmeticCheckResult(checked=True, ok=False, detail=f"unverified numbers: {', '.join(unverified)}")
+        return ArithmeticCheckResult(checked=True, ok=True, detail=f"all {len(numbers)} numbers grounded in sources")
     return ArithmeticCheckResult(checked=True, ok=True, detail=f"verified {len(numbers)} numbers")
 
 

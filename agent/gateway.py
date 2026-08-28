@@ -504,6 +504,16 @@ class Gateway:
         if is_write:
             anchor = str(cmd.args.get("anchor") or cmd.args.get("concept") or cmd.args.get("target") or cmd.args.get("claim") or "")
             etag = self._etags.get(anchor)
+            if not etag and getattr(self.ctx, "history", None):
+                for item in reversed(self.ctx.history):
+                    if isinstance(item, (tuple, list)) and len(item) >= 3:
+                        prev_cmd, _, prev_res = item[0], item[1], item[2]
+                        if isinstance(prev_res, Mapping) and prev_res.get("etag"):
+                            prev_args = prev_cmd.args if hasattr(prev_cmd, "args") else (prev_cmd.get("args") if isinstance(prev_cmd, Mapping) else {})
+                            if (prev_args or {}).get("anchor") == anchor:
+                                etag = str(prev_res["etag"])
+                                self._etags[anchor] = etag
+                                break
             if not etag:
                 return self.deny(cmd, "write without a fresh If-Match etag")
             key = f"{anchor}:{tool}"
